@@ -1,0 +1,33 @@
+# GitHub repository ingestion
+GitPython
+
+# Code parsing
+tree-sitter
+tree-sitter-language-pack
+
+# RAG / LangChain
+langchain
+langchain-core
+langchain-community
+langchain-groq
+
+# Embeddings
+sentence-transformers
+
+# Vector database
+faiss-cpu
+qdrant-client
+
+# API
+fastapi
+uvicorn[standard]
+
+# Data validation / settings
+pydantic
+python-dotenv
+
+# HTTP requests
+requests
+
+# Frontend (if using Streamlit)
+streamlit

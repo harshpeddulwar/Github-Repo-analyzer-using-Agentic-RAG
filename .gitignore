@@ -1,0 +1,7 @@
+repos/
+qdrant_storage/
+AgenticRag/
+__pycache__/
+
+
+.env
