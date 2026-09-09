@@ -1,5 +1,5 @@
 import os
-from cloning import walk_repository
+from src.cloning import walk_repository
 
 # Tree-sitter configurations for common programming languages
 LANGUAGE_CONFIGS = {

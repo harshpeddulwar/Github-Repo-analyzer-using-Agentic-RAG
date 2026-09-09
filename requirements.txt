@@ -10,12 +10,10 @@ langchain
 langchain-core
 langchain-community
 langchain-groq
-
 # Embeddings
 sentence-transformers
 
 # Vector database
-faiss-cpu
 qdrant-client
 
 # API
