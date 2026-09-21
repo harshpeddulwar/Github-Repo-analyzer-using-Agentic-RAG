@@ -319,7 +319,7 @@ st.subheader("2. Codebase Question Answering (Agentic RAG)")
 
 # Query input form
 with st.form(key="qa_form", clear_on_submit=False):
-    default_text = clicked_suggestion if clicked_suggestion else st.session_state.get("query_input", "")
+    default_text = st.session_state.get("query_input", "")
     user_query = st.text_input(
         "Ask a question about the repository:",
         value=default_text,
@@ -337,10 +337,10 @@ if clear_btn:
     st.session_state.last_query = ""
     st.session_state.query_input = ""
     st.session_state.qa_history = []
-    st.rerun()
+    st.rerun() 
 
 # Handle Query Execution (either form submit or suggestion click)
-query_to_run = clicked_suggestion if clicked_suggestion else (user_query.strip() if submit_query else None)
+query_to_run = user_query.strip() if submit_query else None
 
 if query_to_run:
     q = query_to_run.strip()
