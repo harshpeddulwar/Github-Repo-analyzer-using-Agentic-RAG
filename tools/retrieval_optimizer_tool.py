@@ -25,6 +25,11 @@ CHARS_PER_TOKEN_ESTIMATE = 4
 DEFAULT_MAX_TOKENS = 4000
 
 
+# Process-wide cache so the cross-encoder is loaded once, not every time a
+# new orchestrator/agent (e.g. after switching repos) is created.
+_RERANKER_CACHE: Dict[str, Any] = {}
+
+
 class RetrievalOptimizer:
     """
     Turns a raw pool of vector-search candidates into a single, ready-to-use
@@ -47,7 +52,8 @@ class RetrievalOptimizer:
         final_result_count: int = DEFAULT_FINAL_RESULT_COUNT,
     ):
         self._reranker_model_name = reranker_model
-        self._reranker = None  # lazily loaded; False = "tried and failed"
+        # lazily loaded; False = "tried and failed". Seeded from the shared cache.
+        self._reranker = _RERANKER_CACHE.get(reranker_model)
 
         self.min_rerank_score = min_rerank_score
         self.max_chunks_per_file = max_chunks_per_file
@@ -150,6 +156,7 @@ class RetrievalOptimizer:
             try:
                 from sentence_transformers import CrossEncoder
                 self._reranker = CrossEncoder(self._reranker_model_name)
+                _RERANKER_CACHE[self._reranker_model_name] = self._reranker
             except Exception:
                 # Missing dependency, no network to fetch weights, etc. --
                 # degrade gracefully rather than breaking search entirely.

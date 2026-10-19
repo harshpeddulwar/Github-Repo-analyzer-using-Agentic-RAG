@@ -9,7 +9,7 @@ class EmbeddingPipe:
         self,
         model_name: str = "jinaai/jina-embeddings-v2-base-code",
         device: Optional[str] = None,
-        batch_size: int = 32,
+        batch_size: int = 2,
         max_seq_length: Optional[int] = None,
     ):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -36,13 +36,16 @@ class EmbeddingPipe:
         Build a stable ID for a chunk so embeddings can be mapped back to
         chunks and re-embedded/upserted deterministically when a file changes.
         """
+        repo_id = chunk.get("repo_id", "")
         file_path = chunk.get("file_path", "unknown")
         start_line = chunk.get("start_line", "")
         end_line = chunk.get("end_line", "")
         name = chunk.get("name", "")
         chunk_type = chunk.get("type", "")
 
-        raw = f"{file_path}:{chunk_type}:{name}:{start_line}-{end_line}"
+        # repo_id is part of the seed so two repos with the same relative
+        # paths (e.g. src/main.py) can never overwrite each other's points.
+        raw = f"{repo_id}:{file_path}:{chunk_type}:{name}:{start_line}-{end_line}"
         # return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16] --> this makes hexIDs which qdrant use.
         return str(uuid.uuid5(uuid.NAMESPACE_URL, raw))  #--> this makes uuid
 
@@ -96,6 +99,7 @@ class EmbeddingPipe:
         self,
         chunks: List[Dict[str, Any]],
         batch_size: Optional[int] = None,
+        repo_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         Embeds chunks and returns a list of dicts, each the original chunk
@@ -118,8 +122,10 @@ class EmbeddingPipe:
             print("[WARN] No valid (non-empty) chunks to embed.")
             return []
 
-        # Assign stable IDs up front
+        # Tag with the repo and assign stable IDs up front
         for chunk in valid_chunks:
+            if repo_id:
+                chunk["repo_id"] = repo_id
             chunk["chunk_id"] = self.make_chunk_id(chunk)
 
         texts = [self.prepare_chunk(chunk) for chunk in valid_chunks]

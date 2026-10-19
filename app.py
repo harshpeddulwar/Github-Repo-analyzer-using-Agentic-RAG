@@ -1,6 +1,5 @@
 import os
 import sys
-import yaml
 from dotenv import load_dotenv
 import streamlit as st
 
@@ -8,7 +7,8 @@ import streamlit as st
 load_dotenv()
 
 # Internal modules
-from src.cloning import clone_repository, walk_repository, REPO_DIR
+from config_loader import load_config
+from src.cloning import clone_repository, walk_repository, repo_id_from_path, REPO_DIR
 from src.parsing import load_and_chunk_repository
 from src.embedding import EmbeddingPipe
 from src.VectorDB import QdrantStore
@@ -97,10 +97,7 @@ st.markdown("""
 # =====================================================================
 @st.cache_resource(show_spinner=False)
 def get_config():
-    config_path = "config.yaml"
-    if os.path.exists(config_path):
-        with open(config_path, "r", encoding="utf-8") as f:
-            return yaml.safe_load(f)
+    return load_config()
 
 
 config = get_config()
@@ -110,12 +107,21 @@ COLLECTION_NAME = config["vector_db"]["collection_name"]
 
 @st.cache_resource(show_spinner="Loading Embedding Model (Jina Code)...")
 def get_embedder():
-    return EmbeddingPipe()
+    return EmbeddingPipe(
+        model_name=config["embedding"]["model"],
+        batch_size=config["embedding"]["batch_size"],
+    )
 
 
 @st.cache_resource(show_spinner="Connecting to Vector DB (Qdrant)...")
 def get_vector_db():
-    return QdrantStore(collection_name=COLLECTION_NAME)
+    vcfg = config["vector_db"]
+    return QdrantStore(
+        collection_name=COLLECTION_NAME,
+        vector_size=vcfg["vector_size"],
+        url=vcfg["url"],
+        path=vcfg["path"],
+    )
 
 
 # Initialize Session State
@@ -156,8 +162,9 @@ def get_or_create_orchestrator(repo_path: str):
         embedder=embedder,
         vector_db=vector_db,
         model=LLM_MODEL,
-        max_revision_attempts=1,
-    )
+        repo_id=repo_id_from_path(repo_path),
+        config=config,
+            )
 
 
 # =====================================================================
@@ -181,8 +188,11 @@ with col_stat1:
 with col_stat2:
     try:
         v_db = get_vector_db()
-        count = v_db.count()
-        st.info(f"🔢 Vectors in DB: **{count}**")
+        if st.session_state.active_repo_name:
+            count = v_db.count(repo_id_from_path(st.session_state.active_repo_path))
+            st.info(f"🔢 Vectors for this repo: **{count}**")
+        else:
+            st.info(f"🔢 Vectors in DB: **{v_db.count()}**")
     except Exception:
         st.info("🔢 Vectors in DB: **0**")
 
@@ -224,8 +234,20 @@ with col_opt2:
             st.session_state.active_repo_name = selected_existing
             st.session_state.active_repo_path = os.path.join(REPO_DIR, selected_existing)
             st.session_state.orchestrator = get_or_create_orchestrator(st.session_state.active_repo_path)
-            st.success(f"Switched active repository to **{selected_existing}**")
+            # Fresh conversation for the new repo
+            st.session_state.qa_history = []
+            st.session_state.last_result = None
+            if not get_vector_db().has_repo(repo_id_from_path(st.session_state.active_repo_path)):
+                st.session_state.index_warning = (
+                    f"**{selected_existing}** has no vectors yet - tick "
+                    "'Re-parse & Re-index Embeddings' and click Ingest before asking questions."
+                )
+            else:
+                st.session_state.index_warning = None
             st.rerun()
+
+if st.session_state.get("index_warning"):
+    st.warning(st.session_state.index_warning)
 
 # Handle Ingestion Logic
 if ingest_button:
@@ -270,25 +292,40 @@ if ingest_button:
                     else:
                         st.info(f"Extracted **{len(chunks)}** AST code chunks from repository files.")
 
-                        # Step 3: Embed Chunks
+                        # Step 3: Embed FIRST (nothing in the DB is touched yet, so a
+                        # crash here leaves the existing index fully intact).
                         progress_bar.progress(60, text=f"Generating embeddings for {len(chunks)} chunks...")
-                        vector_db.ensure_collection(recreate=True)
-                        enriched_chunks = embedder.embed_chunks(chunks)
-
-                        # Step 4: Upsert to Vector DB
+                        enriched_chunks = embedder.embed_chunks(chunks, repo_id=repo_name)
+                        # Step 4: upsert new points, then drop only THIS repo's stale ones.
                         progress_bar.progress(85, text="Storing embeddings into Vector DB (Qdrant)...")
+                        vector_db.ensure_collection()
                         upserted_count = vector_db.upsert(enriched_chunks)
+                        removed = vector_db.delete_stale(
+                            repo_name, keep_ids=[c["chunk_id"] for c in enriched_chunks]
+                        )
                         progress_bar.progress(100, text="Ingestion complete!")
-                        st.success(f"✅ Successfully indexed **{upserted_count}** chunks into Qdrant for **{repo_name}**!")
+                        st.success(
+                            f"✅ Indexed **{upserted_count}** chunks for **{repo_name}** "
+                            f"({removed} outdated chunk(s) removed)."
+                        )
                 else:
-                    vector_db.ensure_collection(recreate=False)
+                    vector_db.ensure_collection()
                     progress_bar.progress(100, text="Using existing vector index.")
-                    st.success(f"✅ Active repository set to **{repo_name}** using existing vector index.")
+                    if vector_db.has_repo(repo_name):
+                        st.success(f"✅ Active repository set to **{repo_name}** using existing vector index.")
+                    else:
+                        st.warning(
+                            f"**{repo_name}** has no vectors in the index yet - re-run with "
+                            "'Re-parse & Re-index Embeddings' ticked."
+                        )
 
                 # Set active session state
                 st.session_state.active_repo_path = local_path
                 st.session_state.active_repo_name = repo_name
                 st.session_state.orchestrator = get_or_create_orchestrator(local_path)
+                st.session_state.qa_history = []
+                st.session_state.last_result = None
+                st.session_state.index_warning = None
                 st.rerun()
 
             except Exception as e:
@@ -373,7 +410,34 @@ if st.session_state.last_result:
     evidence = res.get("evidence", "")
     if evidence and evidence != "No tool calls were made.":
         with st.expander("🔍 View Agent Tool Calls & Retrieved Evidence", expanded=False):
-            st.markdown(f"```text\n{evidence}\n```")
+            st.code(evidence, language="text")
+    
+    # How the orchestrator handled the question (plan -> delegate -> verify)
+    plan = res.get("plan")
+    verification = res.get("verification")
+    if plan or verification:
+        with st.expander("🧭 How the agents worked (plan → retrieve → verify)", expanded=False):
+            if plan:
+                st.markdown(
+                    f"**Planner** - intent: `{plan.get('intent')}`  \n"
+                    f"Standalone question: {plan.get('standalone_question')}"
+                )
+                subs = plan.get("sub_questions") or []
+                if len(subs) > 1:
+                    st.markdown("Sub-questions:\n" + "\n".join(f"{i}. {q}" for i, q in enumerate(subs, 1)))
+            for sr in res.get("sub_results", []):
+                note = " (hit step limit)" if sr.get("hit_step_limit") else ""
+                st.markdown(f"- **Retriever** `{sr['sub_question']}` → {sr['tool_calls']} tool call(s){note}")
+            if verification:
+                if verification.get("skipped"):
+                    st.markdown(f"**Verifier** - skipped ({verification['skipped']})")
+                elif verification.get("passed"):
+                    st.markdown(f"**Verifier** - ✅ passed after {verification.get('revisions', 0)} revision(s)")
+                else:
+                    st.markdown(
+                        f"**Verifier** - ⚠️ unresolved after {verification.get('revisions', 0)} revision(s):\n"
+                        + "\n".join(f"- {i}" for i in verification.get("issues", []))
+                    )
     
     # Previous queries in session
     if len(st.session_state.qa_history) > 1:
@@ -384,4 +448,5 @@ if st.session_state.last_result:
                 st.divider()
 
 # Footer
+st.markdown("<br><br><center><small style='color: gray;'>This app currently doesnt support jupyter notebooks. </small></center>", unsafe_allow_html=True)
 st.markdown("<br><br><center><small style='color: gray;'>Agentic RAG GitHub Repoitory Analyzer </small></center>", unsafe_allow_html=True)

@@ -1,22 +1,23 @@
-GitPython
+# Minimums reflect the APIs the code uses (langchain.agents.create_agent needs 1.x,
+# qdrant query_points needs >=1.10). For fully reproducible installs run
+# `pip freeze > requirements.lock` inside your working venv and commit that too.
+GitPython>=3.1
 
 tree-sitter
 tree-sitter-language-pack
 
-langchain
-langchain-core
-langchain-community
+langchain>=1.0
+langchain-core>=1.0
 langchain-groq
-sentence-transformers
+langgraph>=1.0
+sentence-transformers>=3.0
+torch
+numpy
 
-qdrant-client
+qdrant-client>=1.10
 
-fastapi
-uvicorn[standard]
-
-pydantic
+pydantic>=2
 python-dotenv
-
-requests
+pyyaml
 
 streamlit

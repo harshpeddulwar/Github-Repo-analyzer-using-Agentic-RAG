@@ -1,28 +1,21 @@
 import os
-import yaml
 from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
 
-from src.cloning import clone_repository
+from config_loader import load_config
+from src.cloning import clone_repository, repo_id_from_path
 from src.parsing import load_and_chunk_repository
 from src.embedding import EmbeddingPipe
 from src.VectorDB import QdrantStore
-from agents.orchestrator_agent import OrchestratorAgent
+# from agents.orchestrator_agent import OrchestratorAgent
 
 def main():
     # 1. Load configuration
-    config_path = "config.yaml"
-    if not os.path.exists(config_path):
-        print(f"[ERROR] Configuration file '{config_path}' not found.")
-        return
-
-    with open(config_path, "r", encoding="utf-8") as file:
-        config = yaml.safe_load(file)
-
+    config = load_config()
+    
     llm_model = config["llm"]["model"]
-    temperature = config["llm"]["temperature"]
     collection_name = config["vector_db"]["collection_name"]
 
     print("=" * 80)
@@ -48,8 +41,18 @@ def main():
         return
 
     # Initialize Embedder and Vector DB
-    embedder = EmbeddingPipe()
-    vector_db = QdrantStore(collection_name=collection_name)
+    embedder = EmbeddingPipe(
+        model_name=config["embedding"]["model"],
+        batch_size=config["embedding"]["batch_size"],
+    )
+    vcfg = config["vector_db"]
+    vector_db = QdrantStore(
+        collection_name=collection_name,
+        vector_size=vcfg["vector_size"],
+        url=vcfg["url"],
+        path=vcfg["path"],
+    )
+    repo_id = repo_id_from_path(local_path)
 
     # 4. Handle indexing choice if repository already exists
     reindex = True
@@ -68,30 +71,30 @@ def main():
             print("[WARN] No chunks extracted. Cannot index repository.")
             return
 
-        # 6. Ensure Collection and Upsert Embeddings
-        print("\n[STEP 3] Recreating Qdrant collection and indexing embeddings...")
-        vector_db.ensure_collection(recreate=True)
-        
-        # Embed chunks
-        enriched_chunks = embedder.embed_chunks(chunks)
-        
-        # Store in Vector DB
+        # 6. Embed first (DB untouched), then upsert and drop only this repo's stale points
+        print("\n[STEP 3] Embedding chunks, then updating the index for this repo...")
+        enriched_chunks = embedder.embed_chunks(chunks, repo_id=repo_id)
+        vector_db.ensure_collection()
         vector_db.upsert(enriched_chunks)
-        print(f"[INFO] Indexing completed. {vector_db.count()} points stored.")
+        vector_db.delete_stale(repo_id, keep_ids=[c["chunk_id"] for c in enriched_chunks])
+        print(f"[INFO] Indexing completed. {vector_db.count(repo_id)} points stored for '{repo_id}'.")
     else:
         print("\n[STEP 2 & 3] Skipping parsing and re-indexing. Using existing vector index.")
         # Ensure the collection exists even if we skip re-indexing, without deleting existing data
-        vector_db.ensure_collection(recreate=False)
+        vector_db.ensure_collection()
+        if not vector_db.has_repo(repo_id):
+            print(f"[WARN] No vectors found for '{repo_id}'. Re-run and choose to re-index.")
 
     # 7. Initialize Orchestrator Agent
-    print("\n[STEP 4] Initializing Orchestrator Agent...")
-    agent = OrchestratorAgent(
-        repo_path=local_path,
-        embedder=embedder,
-        vector_db=vector_db,
-        model=llm_model,
-        max_revision_attempts=1,
-    )
+    # print("\n[STEP 4] Initializing Orchestrator Agent...")
+    # agent = OrchestratorAgent(
+    #     repo_path=local_path,
+    #     embedder=embedder,
+    #     vector_db=vector_db,
+    #     model=llm_model,
+    #     repo_id=repo_id,
+    #     config=config,
+    #         )
     print("\nAgent ready! You can now query the repository.")
     print("Type 'exit' to quit.")
 
@@ -116,6 +119,12 @@ def main():
             print("=" * 80)
             print(result.get("answer", "No answer generated."))
 
+            plan = result.get("plan", {})
+            ver = result.get("verification", {})
+            print("\n" + "-" * 80)
+            print(f"[plan] intent={plan.get('intent')} sub_questions={plan.get('sub_questions')}")
+            print(f"[verify] passed={ver.get('passed')} revisions={ver.get('revisions')} issues={ver.get('issues')}")
+            
             print("\n" + "=" * 80)
             print("EVIDENCE / TOOL CALLS")
             print("=" * 80)

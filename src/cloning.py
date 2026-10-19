@@ -32,17 +32,27 @@ ALLOWED_EXTENSIONS = {
     ".txt",
     ".json",
     ".yaml",
-    ".yml"
+    ".yml",
 }
 
 # Create repository storage directory
 os.makedirs(REPO_DIR, exist_ok=True)
 
 
+def repo_id_from_path(local_path):
+    """Stable ID used to tag/filter a repository's vectors in Qdrant."""
+    return os.path.basename(os.path.normpath(local_path))
+
+
 def clone_repository(github_url):
     """
     Clone a GitHub repository into the repos directory.
     """
+
+    # Only plain http(s) URLs: blocks git's "ext::" / "file::" transports.
+    if not str(github_url).startswith(("https://", "http://")):
+        print(f"Refusing to clone non-http(s) URL: {github_url!r}")
+        return None
 
     repo_name = github_url.rstrip("/").split("/")[-1].replace(".git", "")
     local_path = os.path.join(REPO_DIR, repo_name)
