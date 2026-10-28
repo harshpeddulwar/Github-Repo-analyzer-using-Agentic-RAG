@@ -1,5 +1,8 @@
 import os
 from git import Repo
+from src.logger import get_logger
+
+logger = get_logger("cloning")
 
 REPO_DIR = "repos"
 
@@ -48,10 +51,11 @@ def clone_repository(github_url):
     """
     Clone a GitHub repository into the repos directory.
     """
+    logger.info("[INGESTION - STEP 1/4] Resolving repository from URL: %s", github_url)
 
     # Only plain http(s) URLs: blocks git's "ext::" / "file::" transports.
     if not str(github_url).startswith(("https://", "http://")):
-        print(f"Refusing to clone non-http(s) URL: {github_url!r}")
+        logger.error("[INGESTION - STEP 1/4] Refusing to clone non-http(s) URL: %r", github_url)
         return None
 
     repo_name = github_url.rstrip("/").split("/")[-1].replace(".git", "")
@@ -59,15 +63,16 @@ def clone_repository(github_url):
 
     # If repository already exists, don't clone again
     if os.path.exists(local_path):
-        print(f"Repository already exists: {local_path}")
+        logger.info("[INGESTION - STEP 1/4] Repository directory already exists at: %s", local_path)
         return local_path
 
     try:
+        logger.info("[INGESTION - STEP 1/4] Cloning '%s' into '%s'...", github_url, local_path)
         Repo.clone_from(github_url, local_path)
-        print(f"Repository cloned successfully: {local_path}")
+        logger.info("[INGESTION - STEP 1/4] Repository cloned successfully: %s", local_path)
 
     except Exception as e:
-        print(f"Error cloning repository: {e}")
+        logger.error("[INGESTION - STEP 1/4] Error cloning repository '%s': %s", github_url, e)
         return None
 
     return local_path
@@ -77,11 +82,10 @@ def walk_repository(local_path):
     """
     Walk through the repository and return useful source/documentation files.
     """
-
     file_paths = []
 
     if not os.path.isdir(local_path):
-        print(f"Repository path does not exist: {local_path}")
+        logger.warning("Repository path does not exist: %s", local_path)
         return file_paths
 
     for root, dirs, files in os.walk(local_path):
@@ -102,7 +106,7 @@ def walk_repository(local_path):
                 continue
 
             file_path = os.path.join(root, file)
-
             file_paths.append(file_path)
 
+    logger.debug("Walked '%s': discovered %d candidate source files.", local_path, len(file_paths))
     return file_paths

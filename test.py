@@ -9,7 +9,10 @@ from src.cloning import clone_repository, repo_id_from_path
 from src.parsing import load_and_chunk_repository
 from src.embedding import EmbeddingPipe
 from src.VectorDB import QdrantStore
-# from agents.orchestrator_agent import OrchestratorAgent
+from src.logger import get_logger
+from agents.orchestrator_agent import OrchestratorAgent
+
+logger = get_logger("cli")
 
 def main():
     # 1. Load configuration
@@ -30,7 +33,6 @@ def main():
 
     # 3. Clone repository
     print(f"\n[STEP 1] Cloning repository: {github_url} ...")
-    # clone_repository returns local_path
     repo_name = github_url.rstrip("/").split("/")[-1].replace(".git", "")
     local_path = os.path.join("repos", repo_name)
     already_exists = os.path.exists(local_path)
@@ -80,21 +82,20 @@ def main():
         print(f"[INFO] Indexing completed. {vector_db.count(repo_id)} points stored for '{repo_id}'.")
     else:
         print("\n[STEP 2 & 3] Skipping parsing and re-indexing. Using existing vector index.")
-        # Ensure the collection exists even if we skip re-indexing, without deleting existing data
         vector_db.ensure_collection()
         if not vector_db.has_repo(repo_id):
             print(f"[WARN] No vectors found for '{repo_id}'. Re-run and choose to re-index.")
 
     # 7. Initialize Orchestrator Agent
-    # print("\n[STEP 4] Initializing Orchestrator Agent...")
-    # agent = OrchestratorAgent(
-    #     repo_path=local_path,
-    #     embedder=embedder,
-    #     vector_db=vector_db,
-    #     model=llm_model,
-    #     repo_id=repo_id,
-    #     config=config,
-    #         )
+    print("\n[STEP 4] Initializing Orchestrator Agent...")
+    agent = OrchestratorAgent(
+        repo_path=local_path,
+        embedder=embedder,
+        vector_db=vector_db,
+        model=llm_model,
+        repo_id=repo_id,
+        config=config,
+    )
     print("\nAgent ready! You can now query the repository.")
     print("Type 'exit' to quit.")
 

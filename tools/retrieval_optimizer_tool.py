@@ -1,4 +1,7 @@
-from typing import Optional, List, Dict, Any
+from typing import Any, Dict, List, Optional
+from src.logger import get_logger
+
+logger = get_logger("retrieval_optimizer")
 
 
 # Default cross-encoder used for reranking. General-purpose, not code-specific;
@@ -82,8 +85,10 @@ class RetrievalOptimizer:
         pipeline, so callers can return it straight to the agent.
         """
         if not candidates:
+            logger.debug("RetrievalOptimizer: received 0 candidates.")
             return "No semantically matching code chunks found."
 
+        logger.debug("RetrievalOptimizer: processing %d candidates for query '%s'", len(candidates), query)
         working = [dict(c) for c in candidates]  # don't mutate caller's list
 
         working = self._deduplicate(working)
@@ -92,6 +97,7 @@ class RetrievalOptimizer:
         working = self._diversify(working)
 
         working = working[: self.final_result_count]
+        logger.debug("RetrievalOptimizer: %d chunk(s) survived reranking and diversification.", len(working))
 
         if not working:
             return "No sufficiently relevant code chunks found for this query."

@@ -27,6 +27,9 @@ from agents.retrieval_agent import RetrievalAgent
 from config_loader import load_config
 from langchain_core.messages import HumanMessage, SystemMessage
 from src.cloning import ALLOWED_EXTENSIONS, walk_repository
+from src.logger import get_logger
+
+logger = get_logger("orchestrator")
 
 INTENTS = ("lookup", "explain_flow", "architecture", "off_topic")
 
@@ -239,10 +242,13 @@ class OrchestratorAgent:
         self.history = []
 
     def answer(self, query: str) -> Dict[str, Any]:
+        logger.info("[RAG - STEP 1/5: Plan] Received user query: '%s'", query)
+
         # 1-2. PLAN + ROUTE
         plan = self._plan(query)
 
         if plan["intent"] == "off_topic":
+            logger.info("[RAG - STEP 2/5: Route] Intent classified as 'off_topic'. Bypassing retrieval agent.")
             text = self._llm_text(OFF_TOPIC_PROMPT.format(question=query)) or (
                 "That doesn't look like a question about the loaded repository - ask me about its code!"
             )
@@ -251,11 +257,21 @@ class OrchestratorAgent:
 
         budget = self.route_budgets.get(plan["intent"], self.route_budgets["lookup"])
         hint = ROUTE_HINTS.get(plan["intent"])
+        logger.info(
+            "[RAG - STEP 2/5: Route] Intent: '%s' -> Tool budget: %d, Hint: %s",
+            plan["intent"],
+            budget,
+            hint or "(none)",
+        )
 
         # 3. DELEGATE
         all_steps: List[Dict[str, Any]] = []
         sub_results: List[Dict[str, Any]] = []
-        for sq in plan["sub_questions"]:
+        num_subs = len(plan["sub_questions"])
+        logger.info("[RAG - STEP 3/5: Retrieve] Delegating %d sub-question(s) to RetrievalAgent...", num_subs)
+
+        for idx, sq in enumerate(plan["sub_questions"], start=1):
+            logger.info("[RAG - STEP 3/5: Retrieve] Sub-question (%d/%d): '%s'", idx, num_subs, sq)
             r = self.retrieval_agent.ask(sq, max_steps=budget, hint=hint)
             for s in r["steps"]:
                 s["sub_question"] = sq
@@ -264,19 +280,35 @@ class OrchestratorAgent:
                 {"sub_question": sq, "answer": r["answer"], "tool_calls": len(r["steps"]),
                  "hit_step_limit": r.get("hit_step_limit", False)}
             )
+            logger.info(
+                "[RAG - STEP 3/5: Retrieve] Sub-question (%d/%d) complete: %d tool calls made (hit limit: %s)",
+                idx,
+                num_subs,
+                len(r["steps"]),
+                r.get("hit_step_limit", False),
+            )
 
         # 4. SYNTHESIZE
+        logger.info("[RAG - STEP 4/5: Synthesize] Synthesizing answers across %d sub-question result(s)...", len(sub_results))
         draft = self._synthesize(plan["standalone_question"], sub_results)
 
         # 5. VERIFY (+ at most `max_revisions` targeted revisions)
         repo_files, line_counts = self._repo_index()
         revisions = 0
         issues: List[str] = []
+        logger.info("[RAG - STEP 5/5: Verify] Verifying draft citations against %d tool step(s)...", len(all_steps))
+
         for attempt in range(self.max_revisions + 1):
             issues = self._verify(plan["standalone_question"], draft, all_steps, repo_files, line_counts)
             if not issues or attempt >= self.max_revisions:
                 break
             revisions += 1
+            logger.warning(
+                "[RAG - STEP 5/5: Verify] Verification issues found (%d issues). Attempting targeted revision %d/%d...",
+                len(issues),
+                revisions,
+                self.max_revisions,
+            )
             note = (
                 "Your previous draft had these problems:\n- " + "\n- ".join(issues) +
                 f"\n\nPrevious draft:\n{draft[:1500]}\n\n"
@@ -291,10 +323,13 @@ class OrchestratorAgent:
 
         final = draft
         if issues:
+            logger.warning("[RAG - STEP 5/5: Verify] Finished with %d unresolved issue(s). Adding verification notes.", len(issues))
             final += (
                 "\n\n> ⚠️ **Verification notes** - could not be fully confirmed against the retrieved code:\n"
                 + "\n".join(f"> - {i}" for i in issues)
             )
+        else:
+            logger.info("[RAG - STEP 5/5: Verify] All citations and claims verified successfully.")
 
         verification = {
             "passed": not issues,
@@ -303,6 +338,7 @@ class OrchestratorAgent:
             "llm_verifier": self.enable_verifier,
         }
         self._remember(plan["standalone_question"], draft)
+        logger.info("[RAG] Pipeline finished successfully for query: '%s'", query)
         return self._result(final, all_steps, plan, verification, sub_results)
 
     # ------------------------------------------------------------------
@@ -316,6 +352,7 @@ class OrchestratorAgent:
             "used_planner": False,
         }
         if not self.enable_planner:
+            logger.info("[RAG - STEP 1/5: Plan] Planner disabled. Using default lookup route.")
             return fallback
 
         history = "\n".join(
@@ -326,6 +363,7 @@ class OrchestratorAgent:
         )
         data = extract_json(raw or "")
         if not data:
+            logger.warning("[RAG - STEP 1/5: Plan] LLM planner returned invalid JSON. Using fallback.")
             return fallback
 
         standalone = str(data.get("standalone_question") or query).strip() or query
@@ -335,6 +373,13 @@ class OrchestratorAgent:
         subs = data.get("sub_questions")
         subs = [str(s).strip() for s in subs if str(s).strip()] if isinstance(subs, list) else []
         subs = subs[: self.max_subquestions] or [standalone]
+
+        logger.info(
+            "[RAG - STEP 1/5: Plan] Classified intent='%s', standalone_q='%s', sub_questions=%s",
+            intent,
+            standalone,
+            subs,
+        )
         return {
             "standalone_question": standalone,
             "intent": intent,
@@ -344,7 +389,9 @@ class OrchestratorAgent:
 
     def _synthesize(self, question: str, sub_results: List[Dict[str, Any]]) -> str:
         if len(sub_results) == 1:
+            logger.debug("[RAG - STEP 4/5: Synthesize] Single sub-question: skipping synthesis LLM call.")
             return sub_results[0]["answer"]
+        logger.info("[RAG - STEP 4/5: Synthesize] Merging %d sub-answers via LLM synthesis...", len(sub_results))
         parts = "\n\n".join(
             f"### {r['sub_question']}\n{r['answer']}" for r in sub_results
         )
@@ -362,11 +409,16 @@ class OrchestratorAgent:
         issues: List[str] = []
         if not steps:
             issues.append("The answer was produced without retrieving any code from the repository.")
-        issues.extend(check_citations(answer, steps, repo_files, line_counts))
+        citation_issues = check_citations(answer, steps, repo_files, line_counts)
+        issues.extend(citation_issues)
+
+        if citation_issues:
+            logger.warning("[RAG - STEP 5/5: Verify] Deterministic citation issues: %s", citation_issues)
 
         # LLM fact-check: only when the cheap deterministic checks found nothing,
         # and it can only *add* issues when it is explicit about a material problem.
         if self.enable_verifier and steps and not issues:
+            logger.info("[RAG - STEP 5/5: Verify] Running LLM fact-check against evidence...")
             evidence = "\n\n".join(
                 f"[{s.get('tool')}({s.get('args')})]\n{(s.get('result') or '')[:2500]}" for s in steps
             )[:9000]
@@ -376,7 +428,10 @@ class OrchestratorAgent:
             verdict = extract_json(raw or "")
             if verdict and verdict.get("supported") is False:
                 probs = verdict.get("problems") or ["A claim in the answer is not supported by the evidence."]
+                logger.warning("[RAG - STEP 5/5: Verify] LLM verifier detected unsupported claims: %s", probs)
                 issues.extend(str(p) for p in probs[:3])
+            else:
+                logger.info("[RAG - STEP 5/5: Verify] LLM fact-check passed.")
         return issues
 
     # ------------------------------------------------------------------

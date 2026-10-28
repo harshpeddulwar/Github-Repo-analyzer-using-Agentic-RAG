@@ -40,6 +40,13 @@ DEFAULTS: Dict[str, Any] = {
         "history_turns": 4,
         "route_budgets": {"lookup": 3, "explain_flow": 5, "architecture": 6},
     },
+    "logging": {
+        "level": "INFO",
+        "log_file": "logs/pipeline.log",
+        "max_bytes": 5242880,
+        "backup_count": 3,
+        "enable_console": True,
+    },
 }
 
 
@@ -59,4 +66,20 @@ def load_config(path: Optional[str] = None) -> Dict[str, Any]:
     if cfg_path.exists():
         with open(cfg_path, "r", encoding="utf-8") as f:
             user_cfg = yaml.safe_load(f) or {}
-    return _merge(DEFAULTS, user_cfg)
+    merged = _merge(DEFAULTS, user_cfg)
+
+    # Automatically set up logger with loaded config
+    try:
+        from src.logger import setup_logging
+        log_cfg = merged.get("logging", {})
+        setup_logging(
+            level=log_cfg.get("level", "INFO"),
+            log_file=log_cfg.get("log_file"),
+            max_bytes=log_cfg.get("max_bytes", 5242880),
+            backup_count=log_cfg.get("backup_count", 3),
+            enable_console=log_cfg.get("enable_console", True),
+        )
+    except Exception:
+        pass
+
+    return merged

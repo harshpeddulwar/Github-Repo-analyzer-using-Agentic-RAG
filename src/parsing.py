@@ -1,5 +1,8 @@
 import os
 from src.cloning import walk_repository
+from src.logger import get_logger
+
+logger = get_logger("parsing")
 
 # Tree-sitter configurations for common programming languages
 LANGUAGE_CONFIGS = {
@@ -255,7 +258,7 @@ def chunk_code_file(file_content: bytes, file_path: str) -> list[dict]:
         tree = parser.parse(file_content)
         root = tree.root_node
     except Exception as exc:
-        print(f"Warning: tree-sitter parsing failed for {file_path}: {exc}. Falling back to text splitting.")
+        logger.warning("Tree-sitter parsing failed for %s: %s. Falling back to text splitting.", file_path, exc)
         return chunk_text_fallback(file_content.decode("utf-8", errors="replace"), file_path)
         
     config = LANGUAGE_CONFIGS[lang]
@@ -338,7 +341,7 @@ def load_and_chunk_file(file_path: str, repo_root: str) -> list[dict]:
         with open(file_path, "rb") as f:
             content = f.read()
     except Exception as exc:
-        print(f"Warning: could not read file {file_path}: {exc}")
+        logger.warning("Could not read file %s: %s", file_path, exc)
         return []
         
     # Standardize paths to use forward slashes for cross-platform links
@@ -362,9 +365,25 @@ def load_and_chunk_repository(repo_path: str) -> list[dict]:
     """
     Walks the repository and generates chunks for all source files and docs.
     """
-    all_chunks = []
+    logger.info("[INGESTION - STEP 2/4] Parsing and chunking repository at: %s", repo_path)
     file_paths = walk_repository(repo_path)
+    logger.info("[INGESTION - STEP 2/4] Found %d candidate files to parse.", len(file_paths))
+
+    all_chunks = []
+    type_counts = {}
+
     for file_path in file_paths:
         chunks = load_and_chunk_file(file_path, repo_path)
+        for c in chunks:
+            ctype = c.get("type", "unknown")
+            type_counts[ctype] = type_counts.get(ctype, 0) + 1
         all_chunks.extend(chunks)
+
+    summary_details = ", ".join(f"{k}: {v}" for k, v in sorted(type_counts.items())) or "none"
+    logger.info(
+        "[INGESTION - STEP 2/4] AST Chunking complete: %d total chunks extracted across %d files (%s)",
+        len(all_chunks),
+        len(file_paths),
+        summary_details,
+    )
     return all_chunks

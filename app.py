@@ -6,20 +6,22 @@ import streamlit as st
 # Load environment variables
 load_dotenv()
 
-# Internal modules
 from config_loader import load_config
 from src.cloning import clone_repository, walk_repository, repo_id_from_path, REPO_DIR
 from src.parsing import load_and_chunk_repository
 from src.embedding import EmbeddingPipe
 from src.VectorDB import QdrantStore
+from src.logger import get_logger, get_recent_logs, LOG_FILE
 from agents.orchestrator_agent import OrchestratorAgent
+
+logger = get_logger("app")
 
 # =====================================================================
 # Page Configuration & Clean Styling
 # =====================================================================
 st.set_page_config(
-    page_title="GitHub Repo Analyzer - Agentic RAG",
-    page_icon="👍",
+    page_title="GitHub Repo Analyzer using Agentic RAG",
+    page_icon="👻",
     layout="centered",
     initial_sidebar_state="collapsed",
 )
@@ -172,7 +174,7 @@ def get_or_create_orchestrator(repo_path: str):
 # =====================================================================
 st.markdown("""
 <div class="app-header">
-    <div class="app-title">⚡ GitHub Repo Analyzer</div>
+    <div class="app-title">👻 GitHub Repo Analyzer</div>
     <div class="app-subtitle">Agentic RAG for Deep Codebase Understanding & Question Answering</div>
 </div>
 """, unsafe_allow_html=True)
@@ -255,13 +257,10 @@ if ingest_button:
     if not target:
         st.error("Please enter a valid GitHub URL or local repository name.")
     else:
-        status_container = st.container()
-        with status_container:
-            progress_bar = st.progress(0, text="Starting repository ingestion...")
-
+        with st.status("🚀 Ingestion Pipeline in progress...", expanded=True) as status:
             try:
                 # Step 1: Clone or resolve local path
-                progress_bar.progress(15, text="Cloning repository...")
+                st.write("📦 **[STEP 1/4]** Resolving & cloning repository...")
                 if target.startswith("http://") or target.startswith("https://"):
                     local_path = clone_repository(target)
                     if not local_path:
@@ -279,41 +278,47 @@ if ingest_button:
                         st.error(f"Local repository path '{target}' not found.")
                         st.stop()
 
+                st.write(f"✅ Repository ready at `{local_path}`")
+
                 # Step 2: Parse & Chunk
                 embedder = get_embedder()
                 vector_db = get_vector_db()
 
                 if reindex_toggle:
-                    progress_bar.progress(35, text="Parsing and chunking code files via AST...")
+                    st.write("🧩 **[STEP 2/4]** Parsing and AST chunking code files...")
                     chunks = load_and_chunk_repository(local_path)
                     
                     if not chunks:
                         st.warning("No parseable code files or chunks found in this repository.")
                     else:
-                        st.info(f"Extracted **{len(chunks)}** AST code chunks from repository files.")
+                        st.write(f"✅ Extracted **{len(chunks)}** AST code chunks.")
 
-                        # Step 3: Embed FIRST (nothing in the DB is touched yet, so a
-                        # crash here leaves the existing index fully intact).
-                        progress_bar.progress(60, text=f"Generating embeddings for {len(chunks)} chunks...")
+                        # Step 3: Embed FIRST (nothing in the DB is touched yet)
+                        st.write("⚡ **[STEP 3/4]** Generating code embeddings via Jina Code...")
                         enriched_chunks = embedder.embed_chunks(chunks, repo_id=repo_name)
+                        st.write(f"✅ Embedded **{len(enriched_chunks)}** chunks.")
+
                         # Step 4: upsert new points, then drop only THIS repo's stale ones.
-                        progress_bar.progress(85, text="Storing embeddings into Vector DB (Qdrant)...")
+                        st.write("🗄️ **[STEP 4/4]** Storing embeddings in Qdrant & cleaning stale vectors...")
                         vector_db.ensure_collection()
                         upserted_count = vector_db.upsert(enriched_chunks)
                         removed = vector_db.delete_stale(
                             repo_name, keep_ids=[c["chunk_id"] for c in enriched_chunks]
                         )
-                        progress_bar.progress(100, text="Ingestion complete!")
+                        st.write(f"✅ Stored **{upserted_count}** points in Qdrant ({removed} outdated removed).")
+                        status.update(label=f"✅ Ingestion complete for {repo_name}!", state="complete", expanded=False)
                         st.success(
                             f"✅ Indexed **{upserted_count}** chunks for **{repo_name}** "
                             f"({removed} outdated chunk(s) removed)."
                         )
                 else:
+                    st.write("🗄️ **[STEPS 2-4]** Using existing vector index in Qdrant.")
                     vector_db.ensure_collection()
-                    progress_bar.progress(100, text="Using existing vector index.")
                     if vector_db.has_repo(repo_name):
+                        status.update(label=f"✅ Using existing index for {repo_name}!", state="complete", expanded=False)
                         st.success(f"✅ Active repository set to **{repo_name}** using existing vector index.")
                     else:
+                        status.update(label=f"⚠️ {repo_name} has no vectors in index", state="error", expanded=True)
                         st.warning(
                             f"**{repo_name}** has no vectors in the index yet - re-run with "
                             "'Re-parse & Re-index Embeddings' ticked."
@@ -329,6 +334,7 @@ if ingest_button:
                 st.rerun()
 
             except Exception as e:
+                status.update(label="❌ Error during ingestion", state="error")
                 st.error(f"Error during ingestion: {str(e)}")
 
 st.divider()
@@ -389,13 +395,30 @@ if query_to_run:
         if st.session_state.orchestrator is None:
             st.session_state.orchestrator = get_or_create_orchestrator(st.session_state.active_repo_path)
 
-        with st.spinner("Orchestrator Agent is analyzing codebase & gathering evidence..."):
+        with st.status("🔍 Agentic RAG Pipeline in progress...", expanded=True) as status:
             try:
+                st.write("🤖 **[RAG STEP 1/5: Plan]** Decomposing question and planning retrieval...")
                 result = st.session_state.orchestrator.answer(q)
+                plan = result.get("plan", {})
+                st.write(f"🎯 **[RAG STEP 2/5: Route]** Intent: `{plan.get('intent')}` | Sub-questions: {len(plan.get('sub_questions', []))}")
+                
+                sub_results = result.get("sub_results", [])
+                total_tools = sum(sr.get("tool_calls", 0) for sr in sub_results)
+                st.write(f"🔎 **[RAG STEP 3/5: Retrieve]** Executed {total_tools} tool call(s) across codebase.")
+                st.write("✍️ **[RAG STEP 4/5: Synthesize]** Sub-answers synthesized.")
+                
+                ver = result.get("verification", {})
+                if ver.get("passed"):
+                    st.write(f"✅ **[RAG STEP 5/5: Verify]** Verification passed ({ver.get('revisions', 0)} revision(s)).")
+                else:
+                    st.write("⚠️ **[RAG STEP 5/5: Verify]** Finished with verification notes.")
+
+                status.update(label="✅ Answer successfully generated!", state="complete", expanded=False)
                 st.session_state.last_query = q
                 st.session_state.last_result = result
                 st.session_state.qa_history.append({"query": q, "result": result})
             except Exception as e:
+                status.update(label="❌ Error answering query", state="error")
                 st.error(f"Error answering query: {str(e)}")
 
 # Display QA Box
@@ -409,14 +432,14 @@ if st.session_state.last_result:
     # Render Evidence / Tool Calls in an expandable accordion
     evidence = res.get("evidence", "")
     if evidence and evidence != "No tool calls were made.":
-        with st.expander("🔍 View Agent Tool Calls & Retrieved Evidence", expanded=False):
+        with st.expander(" View Agent Tool Calls & Retrieved Evidence", expanded=False):
             st.code(evidence, language="text")
     
     # How the orchestrator handled the question (plan -> delegate -> verify)
     plan = res.get("plan")
     verification = res.get("verification")
     if plan or verification:
-        with st.expander("🧭 How the agents worked (plan → retrieve → verify)", expanded=False):
+        with st.expander(" How the agents worked (plan → retrieve → verify)", expanded=False):
             if plan:
                 st.markdown(
                     f"**Planner** - intent: `{plan.get('intent')}`  \n"
@@ -447,6 +470,32 @@ if st.session_state.last_result:
                 st.markdown(item['result'].get('answer', ''))
                 st.divider()
 
+# System & Pipeline Logs viewer
+st.divider()
+with st.expander("📜 Step-by-Step Pipeline Logs (Live Console Output)", expanded=False):
+    col_log1, col_log2 = st.columns([4, 1])
+    with col_log1:
+        st.caption("Real-time log entries from all pipeline modules (cloning, parsing, embeddings, Qdrant, orchestrator, retriever):")
+    with col_log2:
+        if os.path.exists(LOG_FILE):
+            try:
+                with open(LOG_FILE, "r", encoding="utf-8") as f:
+                    log_data = f.read()
+                st.download_button(
+                    label="📥 Download log",
+                    data=log_data,
+                    file_name="pipeline.log",
+                    mime="text/plain",
+                    use_container_width=True,
+                )
+            except Exception:
+                pass
+
+    recent_logs = get_recent_logs(limit=150)
+    if recent_logs:
+        st.code("\n".join(recent_logs), language="log")
+    else:
+        st.info("No logs recorded in this session yet.")
+
 # Footer
-st.markdown("<br><br><center><small style='color: gray;'>This app currently doesnt support jupyter notebooks. </small></center>", unsafe_allow_html=True)
-st.markdown("<br><br><center><small style='color: gray;'>Agentic RAG GitHub Repoitory Analyzer </small></center>", unsafe_allow_html=True)
+st.markdown("<br><br><center><small style='color: gray;'>Agentic RAG GitHub Repository Analyzer </small></center>", unsafe_allow_html=True)

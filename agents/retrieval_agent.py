@@ -4,6 +4,7 @@ from langchain_core.tools import StructuredTool
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, ToolMessage
 from langchain.agents import create_agent
 from langchain_groq import ChatGroq
+from langchain_ollama import ChatOllama
 
 try:  # raised by LangGraph when recursion_limit is exceeded
     from langgraph.errors import GraphRecursionError
@@ -13,7 +14,10 @@ except ImportError:  # pragma: no cover
 
 from agents.llm_utils import text_of
 from config_loader import load_config
+from src.logger import get_logger
 from tools.retrieval_tools import RetrievalTools
+
+logger = get_logger("retrieval_agent")
 
 
 SYSTEM_PROMPT = """You are a code retrieval agent for a software repository.
@@ -207,6 +211,7 @@ class RetrievalAgent:
         limit was hit.
         """
         content = query if not hint else f"{query}\n\n[Orchestrator note]\n{hint}"
+        logger.debug("RetrievalAgent running on query: '%s' (max_steps=%d)", query, max_steps)
 
         # One tool round = 2 graph steps (model -> tools); +1 for the final answer.
         run_config = {"recursion_limit": 2 * max(1, max_steps) + 1}
@@ -222,9 +227,13 @@ class RetrievalAgent:
                 last_state = state
         except GraphRecursionError:
             hit_limit = True
+            logger.warning("[RETRIEVAL AGENT] Step recursion limit hit (%d tool rounds).", max_steps)
 
         messages = (last_state or {}).get("messages", [])
         steps = self._extract_steps(messages)
+
+        for s in steps:
+            logger.info("[RETRIEVAL AGENT] Executed tool '%s' with args %s", s.get("tool"), s.get("args"))
 
         final_answer = ""
         for msg in reversed(messages):
@@ -234,8 +243,10 @@ class RetrievalAgent:
                     break
 
         if hit_limit or not final_answer:
+            logger.info("[RETRIEVAL AGENT] Generating final answer from gathered evidence...")
             final_answer = self._answer_from_evidence(query, steps)
 
+        logger.debug("RetrievalAgent completed: %d steps, answer length=%d", len(steps), len(final_answer))
         return {"answer": final_answer, "steps": steps, "hit_step_limit": hit_limit}
 
     # ------------------------------------------------------------------

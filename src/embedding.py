@@ -1,8 +1,13 @@
+import uuid
+from typing import Any, Dict, List, Optional, Tuple
+
 import numpy as np
 import torch
 from sentence_transformers import SentenceTransformer
-from typing import List, Dict, Any, Optional, Tuple
-import uuid
+from src.logger import get_logger
+
+logger = get_logger("embedding")
+
 
 class EmbeddingPipe:
     def __init__(
@@ -13,7 +18,7 @@ class EmbeddingPipe:
         max_seq_length: Optional[int] = None,
     ):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        print(f"[INFO] Loading model '{model_name}' on device: {self.device}")
+        logger.info("[INGESTION - STEP 3/4] Loading embedding model '%s' on device: %s", model_name, self.device)
 
         self.model = SentenceTransformer(
             model_name,
@@ -25,7 +30,7 @@ class EmbeddingPipe:
         # silently truncating at a smaller library default.
         if max_seq_length is not None:
             self.model.max_seq_length = max_seq_length
-            print(f"[INFO] max_seq_length set to {self.model.max_seq_length}")
+            logger.info("[INGESTION - STEP 3/4] max_seq_length set to %s", self.model.max_seq_length)
 
         self.batch_size = batch_size
 
@@ -113,13 +118,13 @@ class EmbeddingPipe:
         valid_chunks, skipped_chunks = self._filter_valid_chunks(chunks)
 
         if skipped_chunks:
-            print(
-                f"[INFO] Skipping {len(skipped_chunks)} empty/whitespace-only "
-                f"chunk(s) before embedding."
+            logger.info(
+                "[INGESTION - STEP 3/4] Skipping %d empty/whitespace-only chunk(s) before embedding.",
+                len(skipped_chunks),
             )
 
         if not valid_chunks:
-            print("[WARN] No valid (non-empty) chunks to embed.")
+            logger.warning("[INGESTION - STEP 3/4] No valid (non-empty) chunks to embed.")
             return []
 
         # Tag with the repo and assign stable IDs up front
@@ -131,14 +136,20 @@ class EmbeddingPipe:
         texts = [self.prepare_chunk(chunk) for chunk in valid_chunks]
         effective_batch_size = batch_size or self.batch_size
 
-        print(f"[INFO] Generating embeddings for {len(texts)} chunks...")
+        logger.info(
+            "[INGESTION - STEP 3/4] Generating embeddings for %d chunks (batch size: %d, repo_id: %s)...",
+            len(texts),
+            effective_batch_size,
+            repo_id or "unspecified",
+        )
 
         results: List[Dict[str, Any]] = []
 
         # Embed in explicit batches (rather than one giant model.encode call)
         # so a bad chunk in one batch doesn't take down the whole run.
-        for start in range(0, len(texts), effective_batch_size):
-            end = start + effective_batch_size
+        total_texts = len(texts)
+        for start in range(0, total_texts, effective_batch_size):
+            end = min(start + effective_batch_size, total_texts)
             batch_texts = texts[start:end]
             batch_chunks = valid_chunks[start:end]
 
@@ -151,9 +162,11 @@ class EmbeddingPipe:
                     normalize_embeddings=True,
                 )
             except Exception as exc:
-                print(
-                    f"[WARN] Batch {start}-{end} failed to embed as a group "
-                    f"({exc}). Retrying chunks individually..."
+                logger.warning(
+                    "[INGESTION - STEP 3/4] Batch %d-%d failed to embed as a group (%s). Retrying chunks individually...",
+                    start,
+                    end,
+                    exc,
                 )
                 batch_embeddings = []
                 for i, text in enumerate(batch_texts):
@@ -169,9 +182,11 @@ class EmbeddingPipe:
                     except Exception as inner_exc:
                         chunk_id = batch_chunks[i].get("chunk_id", "unknown")
                         file_path = batch_chunks[i].get("file_path", "unknown")
-                        print(
-                            f"[ERROR] Skipping chunk {chunk_id} in {file_path}: "
-                            f"{inner_exc}"
+                        logger.error(
+                            "[INGESTION - STEP 3/4] Skipping chunk %s in %s: %s",
+                            chunk_id,
+                            file_path,
+                            inner_exc,
                         )
                         batch_embeddings.append(None)
 
@@ -182,9 +197,18 @@ class EmbeddingPipe:
                 enriched["embedding"] = embedding
                 results.append(enriched)
 
-            print(f"[INFO] Embedded {min(end, len(texts))}/{len(texts)} chunks")
+            logger.info(
+                "[INGESTION - STEP 3/4] Embedded %d/%d chunks (%.1f%%)",
+                end,
+                total_texts,
+                (end / total_texts) * 100.0,
+            )
 
-        print(f"[INFO] Successfully embedded {len(results)}/{len(chunks)} input chunks")
+        logger.info(
+            "[INGESTION - STEP 3/4] Embedding complete: %d/%d chunks successfully enriched.",
+            len(results),
+            len(chunks),
+        )
         return results
 
     

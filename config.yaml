@@ -16,7 +16,7 @@ vector_db:
   path: null              # OR set to "qdrant_storage" to use embedded mode (no server needed)
 
 retrieval:
-  candidate_limit: 20     # vectors fetched from Qdrant before rerank
+  candidate_limit: 10    # vectors fetched from Qdrant before rerank
   final_result_count: 4   # chunks handed to the agent
   max_chunks_per_file: 2
   min_rerank_score: -2.0
@@ -32,3 +32,10 @@ orchestrator:
     lookup: 3
     explain_flow: 5
     architecture: 6
+
+logging:
+  level: "INFO"            # DEBUG, INFO, WARNING, ERROR
+  log_file: "logs/pipeline.log"
+  max_bytes: 5242880       # 5 MB per file
+  backup_count: 3          # Keep up to 3 rotated backups
+  enable_console: true

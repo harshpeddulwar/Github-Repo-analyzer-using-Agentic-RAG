@@ -2,7 +2,10 @@ import os
 from typing import Optional
 
 from src.cloning import ALLOWED_EXTENSIONS, walk_repository
+from src.logger import get_logger
 from tools.retrieval_optimizer_tool import RetrievalOptimizer
+
+logger = get_logger("retrieval_tools")
 
 
 DEFAULT_MAX_READ_LINES = 200
@@ -54,6 +57,7 @@ class RetrievalTools:
         Returns the few best chunks with file path, line range, and content.
         """
         try:
+            logger.info("[TOOL: semantic_code_search] Querying: '%s' (repo_id='%s', candidate_limit=%d)", query, self.repo_id, self.candidate_limit)
             query_vector = self.embedder.embed_query(query)
 
             # Scoped to THIS repository only (repo_id filter).
@@ -64,11 +68,13 @@ class RetrievalTools:
             )
 
             if not raw_results:
+                logger.warning("[TOOL: semantic_code_search] 0 matches found in Qdrant for repo '%s'.", self.repo_id)
                 return (
                     "No semantically matching code chunks found. "
                     f"(If this repo was never indexed, index '{self.repo_id}' first.)"
                 )
 
+            logger.debug("[TOOL: semantic_code_search] Found %d candidate chunks in Qdrant.", len(raw_results))
             candidates = [
                 {
                     "payload": res.get("payload", {}),
@@ -77,13 +83,15 @@ class RetrievalTools:
                 for res in raw_results
             ]
 
-            return self.optimizer.optimize(
+            optimized_result = self.optimizer.optimize(
                 query=query,
                 candidates=candidates,
                 max_tokens=self.max_context_tokens,
             )
+            return optimized_result
 
         except Exception as e:
+            logger.error("[TOOL: semantic_code_search] Error during search: %s", e)
             return f"Error during semantic search: {str(e)}"
 
     def list_repo_files(self) -> str:
@@ -92,6 +100,7 @@ class RetrievalTools:
         Helps map out the project layout and find filenames.
         """
         try:
+            logger.info("[TOOL: list_repo_files] Listing repository files for: %s", self.repo_path)
             files = walk_repository(self.repo_path)
 
             rel_files = [
@@ -99,12 +108,14 @@ class RetrievalTools:
                 for f in files
             ]
 
+            logger.info("[TOOL: list_repo_files] Found %d files in repository.", len(rel_files))
             if not rel_files:
                 return "No source files found in this repository."
 
             return "\n".join(rel_files)
 
         except Exception as e:
+            logger.error("[TOOL: list_repo_files] Error listing files: %s", e)
             return f"Error listing repository files: {str(e)}"
 
     def read_file_content(
@@ -125,14 +136,17 @@ class RetrievalTools:
 
             # Prevent path traversal / symlink escape outside the repository
             if os.path.commonpath([self.repo_path, full_path]) != self.repo_path:
+                logger.warning("[TOOL: read_file_content] Blocked path traversal attempt: %s", file_path)
                 return "Error: File path is outside the repository."
 
             if not os.path.isfile(full_path):
+                logger.warning("[TOOL: read_file_content] File not found: %s", file_path)
                 return f"Error: File '{file_path}' does not exist in this repository."
 
             # Only the same file types the indexer accepts (keeps .env, keys, binaries out).
             ext = os.path.splitext(full_path)[1].lower()
             if ext not in ALLOWED_EXTENSIONS:
+                logger.warning("[TOOL: read_file_content] Disallowed extension '%s' for file: %s", ext, file_path)
                 return (
                     f"Error: '{file_path}' is not a readable source/doc file type "
                     f"(allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))})."
@@ -158,6 +172,8 @@ class RetrievalTools:
             if end < start:
                 return "Error: end_line must be greater than or equal to start_line."
 
+            logger.info("[TOOL: read_file_content] Read '%s' lines %d-%d of %d", file_path, start, end, total_lines)
+
             width = len(str(end))
             numbered = "".join(
                 f"{n:>{width}}| {line}"
@@ -173,4 +189,5 @@ class RetrievalTools:
             )
 
         except Exception as e:
+            logger.error("[TOOL: read_file_content] Error reading '%s': %s", file_path, e)
             return f"Error reading file '{file_path}': {str(e)}"

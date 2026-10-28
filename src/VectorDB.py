@@ -3,6 +3,9 @@ from typing import Any, Dict, Iterable, List, Optional, Set
 
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qm
+from src.logger import get_logger
+
+logger = get_logger("vectordb")
 
 
 class QdrantStore:
@@ -51,14 +54,16 @@ class QdrantStore:
         exists = self.client.collection_exists(self.collection_name)
 
         if exists and recreate:
-            print(f"[INFO] Recreating collection '{self.collection_name}'")
+            logger.info("[INGESTION - STEP 4/4] Recreating collection '%s'", self.collection_name)
             self.client.delete_collection(self.collection_name)
             exists = False
 
         if not exists:
-            print(
-                f"[INFO] Creating collection '{self.collection_name}' "
-                f"(dim={self.vector_size}, distance={self.distance})"
+            logger.info(
+                "[INGESTION - STEP 4/4] Creating Qdrant collection '%s' (dim=%d, distance=%s)",
+                self.collection_name,
+                self.vector_size,
+                self.distance,
             )
             self.client.create_collection(
                 collection_name=self.collection_name,
@@ -67,6 +72,7 @@ class QdrantStore:
                 ),
             )
         else:
+            logger.info("[INGESTION - STEP 4/4] Qdrant collection '%s' already exists. Verifying schema...", self.collection_name)
             self._check_dimension()
 
         self._ensure_repo_index()
@@ -129,11 +135,17 @@ class QdrantStore:
     def upsert(self, enriched_chunks: List[Dict[str, Any]], batch_size: int = 256) -> int:
         """Upsert enriched chunks into Qdrant in batches. Returns points upserted."""
         if not enriched_chunks:
-            print("[WARN] No chunks to upsert.")
+            logger.warning("[INGESTION - STEP 4/4] No chunks to upsert into Qdrant.")
             return 0
 
         total = len(enriched_chunks)
         upserted = 0
+        logger.info(
+            "[INGESTION - STEP 4/4] Upserting %d points into Qdrant collection '%s' (batch size: %d)...",
+            total,
+            self.collection_name,
+            batch_size,
+        )
 
         for start in range(0, total, batch_size):
             batch = enriched_chunks[start : start + batch_size]
@@ -147,9 +159,9 @@ class QdrantStore:
             ]
             self.client.upsert(collection_name=self.collection_name, points=points)
             upserted += len(points)
-            print(f"[INFO] Upserted {min(upserted, total)}/{total} points")
+            logger.info("[INGESTION - STEP 4/4] Upserted %d/%d points into Qdrant", min(upserted, total), total)
 
-        print(f"[INFO] Done. {upserted} points stored in '{self.collection_name}'")
+        logger.info("[INGESTION - STEP 4/4] Done. %d points successfully stored in '%s'", upserted, self.collection_name)
         return upserted
 
     def delete_stale(self, repo_id: str, keep_ids: Iterable[str]) -> int:
@@ -181,7 +193,9 @@ class QdrantStore:
                 points_selector=qm.PointIdsList(points=stale[i : i + 512]),
             )
         if stale:
-            print(f"[INFO] Removed {len(stale)} stale point(s) for repo '{repo_id}'")
+            logger.info("[INGESTION - STEP 4/4] Removed %d stale point(s) for repo '%s'", len(stale), repo_id)
+        else:
+            logger.info("[INGESTION - STEP 4/4] No stale points to remove for repo '%s'", repo_id)
         return len(stale)
 
     def delete_by_repo(self, repo_id: str) -> None:
@@ -190,7 +204,7 @@ class QdrantStore:
             collection_name=self.collection_name,
             points_selector=qm.FilterSelector(filter=self._repo_filter(repo_id)),
         )
-        print(f"[INFO] Deleted all points for repo: {repo_id}")
+        logger.info("[INGESTION - STEP 4/4] Deleted all points for repo: %s", repo_id)
 
     def delete_by_file(self, file_path: str, repo_id: Optional[str] = None) -> None:
         """Delete all points of one source file (optionally within one repo)."""
@@ -203,7 +217,7 @@ class QdrantStore:
             collection_name=self.collection_name,
             points_selector=qm.FilterSelector(filter=qm.Filter(must=must)),
         )
-        print(f"[INFO] Deleted existing points for file: {file_path}")
+        logger.info("[INGESTION - STEP 4/4] Deleted existing points for file: %s", file_path)
 
     # ------------------------------------------------------------------
     # Reads
@@ -236,6 +250,7 @@ class QdrantStore:
         if limit <= 0:
             raise ValueError("limit must be greater than 0.")
 
+        logger.debug("Executing Qdrant vector search: limit=%d, repo_id=%s", limit, repo_id)
         response = self.client.query_points(
             collection_name=self.collection_name,
             query=query_vector,
@@ -244,6 +259,7 @@ class QdrantStore:
             with_payload=True,
             with_vectors=False,
         )
+        logger.debug("Qdrant returned %d candidate points.", len(response.points))
         return [
             {"id": str(p.id), "score": p.score, "payload": p.payload}
             for p in response.points
